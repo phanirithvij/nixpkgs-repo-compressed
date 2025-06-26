@@ -1,0 +1,129 @@
+name: compress-repo
+run-name: "${{ inputs.origin_repo }} -> https://github.com/${{ inputs.repo_owner }}/${{ inputs.repo_name }}, cmp: ${{ !inputs.skip_repack  }}"
+on:
+  workflow_dispatch:
+    inputs:
+      repo_owner:
+        description: 'owner'
+        required: true
+        default: 'phanirithvij' # TODO some org to have these repos not tied to my personal account
+      repo_name:
+        description: 'name'
+        required: true
+        default: 'nixpkgs-compressed'
+      origin_repo:
+        description: 'origin repo url'
+        required: true
+        default: 'https://github.com/NixOS/nixpkgs'
+      skip_repack:
+        description: 'skip repacking (warning: compromising on size)'
+        required: true
+        default: false
+        type: boolean
+
+# TODO
+#
+# create repo only via workflow_dispatch, shcedule handles updates
+# but if repo doesn't exist fail early if gha is triggered via schedule
+#
+# ALSO if workflow_dispatch, delete the repo first so it can be recreated?
+# but how to deal with the down time?
+#
+# ALSO add a note somewhere or something which says this is a read-only mirror
+
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@main
+      - name: create repo if not exists
+        run: |
+          gh auth status
+          repo="${{ inputs.repo_owner }}/${{ inputs.repo_name }}"
+          if ! gh repo view $repo >/dev/null 2>&1; then
+            gh repo create $repo --public
+            echo "https://github.com/${{ inputs.repo_owner }}/${{ inputs.repo_name }} created successfully" >> $GITHUB_STEP_SUMMARY
+            # disable gha, see https://github.com/cli/cli/issues/10619
+            gh api --method PUT /repos/$repo/actions/permissions -F "enabled=false"
+          else
+            touch exists
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: fetch repo
+        run: |
+          repo="${{ inputs.repo_owner }}/${{ inputs.repo_name }}"
+          origin_url="${{ inputs.origin_repo }}"
+          mkdir -p repo.git; cd repo.git
+
+          if [ -f ../exists ]; then
+            gh repo clone $repo . -- --bare
+          else
+            git init --bare
+          fi
+
+          git remote set-url origin $origin_url || git remote add origin $origin_url
+          git remote set-url origin --push "https://github.com/$repo.git"
+
+          git config remote.origin.fetch '+refs/*:refs/*'
+          git config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+          git config --add remote.origin.fetch '^refs/pull/*'
+          git config remote.origin.push '+refs/*:refs/*'
+          git config --add remote.origin.push '^refs/pull/*'
+
+          git fetch --prune origin
+
+          # https://stackoverflow.com/a/42871621
+          # set default branch or some random branch will be set upon creation
+          git symbolic-ref HEAD refs/heads/$(gh repo view $origin_url --json defaultBranchRef | jq -r '.defaultBranchRef.name')
+          git rev-parse --abbrev-ref HEAD
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: repack git repo
+        run: |
+          cd repo.git
+          du -sh
+          git repack -adf --window=250
+          du -sh
+        if: ${{ !inputs.skip_repack }}
+      - name: push to new repo
+        run: |
+          repo="${{ inputs.repo_owner }}/${{ inputs.repo_name }}"
+          cd repo.git
+          git config --global url.https://${{ secrets.GH_TOKEN }}@github.com/.insteadOf https://github.com/
+          if [ -f ../exists ]; then
+            HEAD=$(git rev-parse --abbrev-ref HEAD)
+            git fetch origin $HEAD:$HEAD # fetch default branch once again
+          fi
+          bash ../.github/workflows/scripts/git-push-chunked.sh
+
+          # workaround:
+          # set the default branch, for eg. cli/cli repo gets some random branch set
+          # proper fix would be fixing the push script above
+          gh repo edit --default-branch $(git rev-parse --abbrev-ref HEAD) $repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  badges:
+    runs-on: ubuntu-latest
+    needs: main
+    steps:
+      - run: |
+          echo ${{ inputs.origin_repo }} >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ inputs.repo_owner }}/${{ inputs.repo_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Compressing:** ${{ !inputs.skip_repack }}" >> $GITHUB_STEP_SUMMARY
+      - run: |
+          origin_repo_url="${{ inputs.origin_repo }}"
+          origin_repo=$(echo $origin_repo_url | cut -d'/' -f4- | cut -d'.' -f-1)
+          origin_repo_name=$(echo $origin_repo | cut -d'/' -f2)
+          new_repo="${{ inputs.repo_owner }}/${{ inputs.repo_name }}"
+          new_repo_url="https://github.com/$new_repo"
+          if ! [[ $origin_repo_url =~ "github.com" ]]; then
+            # origin repo is not github so can't make repo size badge
+            # without using some selfhosted https://shields.io/badges/endpoint-badge
+            exit 0
+          fi
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          [![full repo size](https://img.shields.io/github/repo-size/$origin_repo?style=for-the-badge&label=$origin_repo_name)]($origin_repo_url)
+          [![compressed repo size](https://img.shields.io/github/repo-size/$new_repo?style=for-the-badge&label=compressed)]($new_repo_url)
+          EOF
