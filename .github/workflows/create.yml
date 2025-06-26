@@ -1,0 +1,42 @@
+on:
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        description: 'name'
+        required: true
+        default: 'nixpkgs-compressed'
+      repo_owner:
+        description: 'owner'
+        required: true
+        default: 'phanirithvij'
+
+jobs:
+  create-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@main
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh auth status
+          if ! gh repo view "${{ inputs.repo_owner }}/${{ inputs.repo_name }}" >/dev/null 2>&1; then
+            gh repo create "${{ inputs.repo_owner }}/${{ inputs.repo_name }}" --public
+          fi
+      - name: fetch nixpkgs
+        run: |
+          mkdir -p nixpkgs.git
+          cd nixpkgs.git
+          git init --bare
+          git remote add origin https://github.com/NixOS/nixpkgs.git
+          git config remote.origin.fetch '+refs/*:refs/*'
+          git config --add remote.origin.fetch '^refs/pull/*'
+          git fetch
+      - name: repack nixpkgs git repo
+        run: |
+          cd nixpkgs.git
+          git repack -adf --window=250
+      - name: push to new repo
+        run: |
+          cd nixpkgs.git
+          git remote add fork https://github.com/${{ inputs.repo_owner }}/${{ inputs.repo_name }}.git
+          bash ../.github/workflows/scripts/git-push-chunked.sh
