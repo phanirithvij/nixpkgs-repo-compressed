@@ -27,5 +27,5 @@ done
 # push the final partial batch
 git push $REMOTE "HEAD:refs/heads/$BRANCH"
 
-# push the final leftover revs
-git push --mirror $REMOTE
+# push the all revs
+git push $REMOTE --all

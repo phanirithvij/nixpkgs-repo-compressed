@@ -31,6 +31,7 @@ jobs:
           git config remote.origin.fetch '+refs/*:refs/*'
           git config --add remote.origin.fetch '^refs/pull/*'
           git remote add fork "https://github.com/${{ inputs.repo_owner }}/${{ inputs.repo_name }}.git"
+          git config remote.fork.push '+refs/*:refs/*'
           git fetch
       - name: repack nixpkgs git repo
         run: |
